@@ -1,0 +1,133 @@
+name: Windows.Veeam.ProcessBackups
+
+description: |
+  **⚠️ USE WITH CAUTION ⚠️️** This artifact is not production-ready and should be considered as a proof-of-concept. It will write gigabytes of data inside the folder specified in `TemporaryFolderPath` parameter and then proceed to delete the files it has written. This artifact was tested on a very limited set of data and only aims to showcase the possibility of a remote Veeam forensics pipeline.
+  
+  Selects Veeam backups to extract based on filters provided in the `Filter` parameter. For each selected Veeam backup, extracts the data, converts it to raw disk image format if necessary, remaps paths to the correct partition in the disk image and launches a list of Velociraptor artifacts defined in `Windows.Veeam.ProcessDiskImage`. 
+
+author: Synacktiv, Maxence Fossat - @cybiosity
+
+type: CLIENT
+
+parameters:
+  - name: UseMetadataFiles
+    description: Enable to list Restore Points using Veeam backup chain metadata files. Disable to use backup files directly (slower).
+    type: bool
+    default: TRUE
+  - name: BackupRepositories
+    description: List of Backup Repositories where ".vbm" or ".vbk", ".vib" and ".vrb" files should be looked for.
+    type: csv
+    default: |
+      BackupRepoPath
+      C:/BackupRepo1
+      D:/BackupRepo2
+  - name: Filter
+    type: string
+    description: VQL-format content of a "WHERE" clause to filter results from a "Windows.Veeam.RestorePoints" artifact.
+    default: ''
+  - name: TemporaryFolderPath
+    type: string
+    description: Absolute path to the temporary folder where the backups will be extracted.
+    default: 'E:/TempOutput'
+
+precondition: SELECT OS FROM info() WHERE OS = 'windows'
+
+required_permissions:
+  - FILESYSTEM_READ
+  - FILESYSTEM_WRITE
+  - EXECVE
+
+sources:
+  - query: |
+      // Hacky way to make sure the deaddisk image processing artifact is embedded
+      LET _ = SELECT * FROM Artifact.Exchange.Windows.Veeam.ProcessDiskImage()
+      
+      // Change RestorePoints artifact according to UseMetadataFiles parameter
+      LET restore_points_query <= if(
+        condition=UseMetadataFiles,
+        then='SELECT * FROM Artifact.Exchange.Windows.Veeam.RestorePoints.MetadataFiles(BackupRepositories=BackupRepositories)',
+        else='SELECT * FROM Artifact.Exchange.Windows.Veeam.RestorePoints.BackupFiles(BackupRepositories=BackupRepositories)'
+      )
+      
+      // Apply WHERE clause to the query based on the Filter parameter
+      LET filtered_query <= if(
+        condition=Filter,
+        then=restore_points_query + ' WHERE ' + Filter,
+        else=restore_points_query
+      )
+    
+      // Execute constructed query to list selected Restore Points
+      LET selected_restore_points = SELECT BackupFilePath, VMName, HostName, CreationTimeUTC, ExtractName, ExtractID
+        FROM query(query=filtered_query, inherit=TRUE)
+      
+      // Extract data from backup and check for statement of success
+      LET extract = SELECT BackupFilePath, VMName, HostName, CreationTimeUTC, ExtractName, ExtractID, TemporaryFolderPath, *
+        FROM Artifact.Exchange.Windows.Veeam.Extract(
+          BackupFilePath=BackupFilePath,
+          OutputFolderPath=TemporaryFolderPath,
+          VMName=VMName,
+          HostName=HostName
+        ) WHERE Stdout =~ VMName+' is restored'
+
+      // List extracted disks in .vhdx, .vmdk and raw format
+      LET extracted_files = SELECT * FROM glob(
+        globs='/*',
+        root=path_join(components=[TemporaryFolderPath, ExtractName+'('+ExtractID+')']),
+        accessor='auto'
+      ) WHERE Name =~ '^(.*\.vhdx|.*-flat\.vmdk|[0-9A-F]{8})$'
+      
+      // Convert files to raw disk image format, when applicable, and check for success
+      LET converted_files = SELECT BackupFilePath, VMName, HostName, CreationTimeUTC, * FROM if(
+        condition= Name =~ '^(.*\.vhdx|.*-flat\.vmdk)$',
+        then={
+            SELECT * FROM Artifact.Exchange.Windows.QEMU.ImgConvert(
+              Source=OSPath,
+              Destination=path_join(components=[TemporaryFolderPath, Name+'.raw']),
+              OutputFormat='raw'
+            ) WHERE Complete = TRUE AND ReturnCode = 0   
+        },
+        else={ SELECT OSPath as Destination FROM scope() }
+      )
+
+      SELECT * FROM foreach(row=selected_restore_points,
+        query={
+            SELECT * FROM foreach(row=extract,
+              query={
+                  SELECT * FROM chain(a={SELECT * FROM foreach(row=extracted_files,
+                    query={
+                        SELECT * FROM foreach(row=converted_files,
+                          query={
+                              SELECT * FROM chain(a={SELECT * FROM query(
+                                query={ 
+                                    SELECT * FROM Artifact.Exchange.Windows.Veeam.ProcessDiskImage(
+                                      DiskImagePath=Destination,
+                                      VMName=VMName,
+                                      HostName=HostName,
+                                      CreationTimeUTC=CreationTimeUTC,
+                                      BackupFilePath=BackupFilePath
+                                    )
+                                },
+                                env=dict(
+                                  Artifact=Artifact,
+                                  Destination=Destination,
+                                  VMName=VMName,
+                                  HostName=HostName,
+                                  CreationTimeUTC=CreationTimeUTC,
+                                  BackupFilePath=BackupFilePath
+                                ))},
+                              b={ 
+                                  SELECT 'POST_PROCESSING' AS ArtifactName, 
+                                         rm(filename=Destination) AS DeletedDiskImage,
+                                         HostName, VMName, CreationTimeUTC, BackupFilePath
+                                    FROM scope() })
+                          })
+                    })},
+                    b={ 
+                      SELECT 'POST_PROCESSING' AS ArtifactName, 
+                             HostName, VMName, CreationTimeUTC, BackupFilePath, * 
+                        FROM Artifact.Windows.System.PowerShell(
+                          Command='Remove-Item -Recurse -Force "'+str(str=path_join(components=(TemporaryFolderPath, ExtractName+'('+ExtractID+')')))+'"'
+                      )}
+                  )
+              })
+        })

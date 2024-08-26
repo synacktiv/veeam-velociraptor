@@ -1,0 +1,69 @@
+name: Windows.Veeam.Extract
+
+description: |
+  Downloads and launches the **Veeam extract utility** on a Veeam full backup file (`.vbk`), incremental backup file (`.vib`) or reverse incremental backup file (`.vrb`).
+
+  This artifact requires you to upload the CLI Veeam extract utility binary for Windows on the Velociraptor server, in order to serve it locally to the endpoints.
+
+  **HOW TO USE:**
+  
+  1. Download the CLI Veeam extract utility (`Extract.exe`) using a registered Veeam account
+  2. In the "*Tools*" section, click on "*VeeamExtract*"
+  3. Click on "*Select file*" to browse your file system and select the binary
+  4. Click on "*Click to upload file*"
+  5. Ensure the calculated hash is correct to make sure you will launch the right binary
+
+author: Synacktiv, Maxence Fossat - @cybiosity
+
+reference:
+  - https://helpcenter.veeam.com/docs/backup/vsphere/extract_utility.html
+
+type: CLIENT
+
+tools:
+  - name: VeeamExtract
+    serve_locally: true
+
+precondition: SELECT OS FROM info() WHERE OS = 'windows'
+
+parameters:
+  - name: BackupFilePath
+    type: string
+    description: Absolute path to the backup file that needs to be extracted.
+  - name: OutputFolderPath
+    type: string
+    description: Absolute path to the output folder where the extracted image will be placed.
+  - name: VMName
+    type: string
+    description: Name of the machine to extract from the backup. Can be found in "VMName" field from the "Windows.Veeam.RestorePoints" artifacts.
+  - name: HostName
+    type: string
+    description: Name of the backup host. Can be found in "HostName" field from the "Windows.Veeam.RestorePoints" artifacts.
+
+required_permissions:
+  - FILESYSTEM_READ
+  - FILESYSTEM_WRITE
+  - EXECVE
+
+sources:
+  - query: |
+      // Get the path to the binary
+      LET binary <= SELECT * FROM Artifact.Generic.Utils.FetchBinary(
+          ToolName= 'VeeamExtract')
+
+      // Build argv array for execve
+      LET parameters <= (binary.OSPath[0], '-restore')
+      LET parameters <= if(
+          condition=VMName,
+          then=parameters + ('-vm', VMName),
+          else=parameters)
+      LET parameters <= if(
+          condition=HostName,
+          then=parameters + ('-host', HostName),
+          else=parameters)
+      LET parameters <= parameters + (BackupFilePath, OutputFolderPath)
+
+      // Call the binary and return its output in rows
+      SELECT utf16(string=Stdout[1:]) AS Stdout, utf16(string=Stderr[1:]) AS Stderr
+        FROM execve(argv=parameters, sep='\n')
+

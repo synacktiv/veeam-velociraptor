@@ -1,0 +1,75 @@
+name: Windows.QEMU.ImgConvert
+
+description: |
+  Downloads **QEMU image converter** and its required dynamic libraries compressed inside a `qemu-img.zip` file. Unzips the archive then launches the `qemu-img.exe` executable to convert the source file to the desired format.
+
+  This artifact requires you to upload a ZIP archive containing `qemu-img.exe` and its required DLLs on the Velociraptor server, in order to serve it locally to the endpoints.
+
+  **HOW TO USE:**
+  
+  1. Create the `qemu-img.zip` archive
+  2. In the "*Tools*" section, click on "*QEMUImgZip*"
+  3. Click on "*Select file*" to browse your file system and select the archive
+  4. Click on "*Click to upload file*"
+  5. Ensure the calculated hash is correct
+
+author: Synacktiv, Maxence Fossat - @cybiosity
+
+reference:
+  - https://www.qemu.org/download/#windows
+  - https://qemu.weilnetz.de/w64/
+
+type: CLIENT
+
+tools:
+  - name: QEMUImgZip
+    serve_locally: true
+
+precondition: SELECT OS FROM info() WHERE OS = 'windows'
+
+parameters:
+  - name: Source
+    type: string
+    description: Absolute path to the source file that should be converted.
+  - name: Destination
+    type: string
+    description: Absolute path to the destination file, including filename.
+  - name: OutputFormat
+    type: string
+    description: Destination format for the conversion.
+    default: 'raw'
+
+required_permissions:
+  - FILESYSTEM_READ
+  - FILESYSTEM_WRITE
+  - EXECVE
+
+sources:
+  - query: |
+      // Get the path to the zipfile
+      LET zipfile <= SELECT * FROM Artifact.Generic.Utils.FetchBinary(
+          ToolName= 'QEMUImgZip',
+          IsExecutable=FALSE
+      )
+
+      // Build temporary folder to unzip
+      LET tempfolder <= tempdir()
+      
+      // Unzip qemu-img.zip
+      LET unzipping <= SELECT * FROM unzip(
+          filename=zipfile.OSPath[0],
+          accessor='auto',
+          output_directory=tempfolder,
+          type='zip'
+      )
+      
+      // Call the binary and return its output in rows
+      SELECT Destination, * FROM execve(
+          argv=[
+              path_join(components=[tempfolder, 'qemu-img.exe']),
+              'convert',
+              Source,
+              '-O', OutputFormat,
+              Destination
+          ], sep='\n'
+      )

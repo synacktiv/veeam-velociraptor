@@ -1,0 +1,270 @@
+name: Windows.Veeam.ProcessDiskImage
+
+description: |
+  Launches a list of artifacts (**specified at the end of the query**) on a raw disk image. This artifact is meant to be launched as a dependency to `Windows.Veeam.ProcessBackups`.
+  
+  **⚠️ WARNING ⚠️️** Due to limitations in how this artifact is designed, you need to specify the list of artifacts to launch directly inside the artifact definition, effectively modifying the artifact. There is no way around this for now.
+
+author: Synacktiv, Maxence Fossat - @cybiosity
+
+type: CLIENT
+
+parameters:
+  - name: DiskImagePath
+    type: string
+    description: Absolute path to the raw disk image.
+    default: ''
+  - name: VMName
+    type: string
+    description: Hostname of the VM whose disk is analyzed.
+    default: 'DEFAULT_VMNAME'
+  - name: HostName
+    type: string
+    description: Name of the hypervisor which hosted the VM whose disk is analyzed.
+    default: 'DEFAULT_HOSTNAME'
+  - name: CreationTimeUTC
+    type: string
+    description: Creation time of the backup in UTC.
+  - name: BackupFilePath
+    type: string
+    description: Path to the backup file from which the disk was extracted.
+
+precondition: SELECT OS FROM info() WHERE OS = 'windows'
+
+sources:
+  - query: |
+      // Find a partition with a Windows directory at the top level
+      LET win_partition = SELECT StartOffset
+        FROM Artifact.Windows.Forensics.PartitionTable(
+            ImagePath=DiskImagePath,
+            Accessor='auto'
+        ) WHERE 'Windows' IN TopLevelDirectory
+      
+      LET escaped_path <= regex_replace(
+        source=DiskImagePath,
+        re='''\\''',
+        replace='/'
+      )
+      
+      LET configuration <= format(format='''
+          remappings:
+          - type: permissions
+            permissions:
+            - COLLECT_CLIENT
+            - FILESYSTEM_READ
+            - FILESYSTEM_WRITE
+            - READ_RESULTS
+            - MACHINE_STATE
+            - SERVER_ADMIN
+          - type: impersonation
+            os: windows
+            hostname: "%[1]v"
+            env:
+            - key: SystemRoot
+              value: C:\Windows
+            - key: WinDir
+              value: C:\Windows
+            disabled_functions:
+            - amsi
+            - lookupSID
+            - token
+            disabled_plugins:
+            - users
+            - certificates
+            - handles
+            - pslist
+            - interfaces
+            - modules
+            - netstat
+            - partitions
+            - proc_dump
+            - proc_yara
+            - vad
+            - winobj
+            - wmi
+          - type: mount
+            from:
+              accessor: raw_ntfs
+              prefix: |
+                {
+                  "DelegateAccessor": "offset",
+                  "Delegate": {
+                    "DelegateAccessor": "file",
+                    "DelegatePath": "%[2]v",
+                    "Path": "%[3]v"
+                  },
+                  "Path": "/"
+                }
+            "on":
+              accessor: ntfs
+              prefix: '\\.\C:'
+              path_type: ntfs
+          - type: mount
+            from:
+              accessor: raw_ntfs
+              prefix: |
+                {
+                  "DelegateAccessor": "offset",
+                  "Delegate": {
+                    "DelegateAccessor": "file",
+                    "DelegatePath": "%[2]v",
+                    "Path": "%[3]v"
+                  },
+                  "Path": "/"
+                }
+            "on":
+              accessor: file
+              prefix: 'C:'
+              path_type: windows
+          - type: mount
+            from:
+              accessor: raw_ntfs
+              prefix: |
+                {
+                  "DelegateAccessor": "offset",
+                  "Delegate": {
+                    "DelegateAccessor": "file",
+                    "DelegatePath": "%[2]v",
+                    "Path": "%[3]v"
+                  },
+                  "Path": "/"
+                }
+            "on":
+              accessor: auto
+              prefix: 'C:'
+              path_type: windows
+          - type: mount
+            from:
+              accessor: raw_reg
+              prefix: |-
+                {
+                  "Path": "/",
+                  "DelegateAccessor": "raw_ntfs",
+                  "Delegate": {
+                    "DelegateAccessor":"offset",
+                    "Delegate": {
+                      "DelegateAccessor": "file",
+                      "DelegatePath": "%[2]v",
+                      "Path": "%[3]v"
+                    },
+                    "Path":"/Windows/System32/Config/SOFTWARE"
+                  }
+                }
+              path_type: registry
+            "on":
+              accessor: registry
+              prefix: HKEY_LOCAL_MACHINE\Software
+              path_type: registry
+          - type: mount
+            from:
+              accessor: raw_reg
+              prefix: |-
+                {
+                  "Path": "/",
+                  "DelegateAccessor": "raw_ntfs",
+                  "Delegate": {
+                    "DelegateAccessor":"offset",
+                    "Delegate": {
+                      "DelegateAccessor": "file",
+                      "DelegatePath": "%[2]v",
+                      "Path": "%[3]v"
+                    },
+                    "Path":"/Windows/System32/Config/SYSTEM"
+                  }
+                }
+              path_type: registry
+            "on":
+              accessor: registry
+              prefix: HKEY_LOCAL_MACHINE\System
+              path_type: registry
+          - type: shadow
+            from:
+              accessor: zip
+            "on":
+              accessor: zip
+          - type: shadow
+            from:
+              accessor: raw_reg
+            "on":
+              accessor: raw_reg
+          - type: shadow
+            from:
+              accessor: data
+            "on":
+              accessor: data
+      ''', args=[
+          VMName,
+          escaped_path,
+          win_partition.StartOffset[0]
+      ])
+      
+      // Remap so that artifacts are launched on the deaddisk image
+      LET _ <= remap(config=configuration, clear=TRUE)
+      
+      // ========================================================
+      // === ↓ CHANGE THIS SECTION ACCORDING TO YOUR NEEDS ↓ ===
+      // ========================================================
+
+      SELECT * FROM chain(
+        a={ 
+            SELECT HostName, VMName, CreationTimeUTC, BackupFilePath, 'Generic.Forensic.SQLiteHunter' AS ArtifactName, *
+              FROM Artifact.Generic.Forensic.SQLiteHunter()
+        },
+        b={ 
+            SELECT HostName, VMName, CreationTimeUTC, BackupFilePath, 'Windows.Forensics.Bam' AS ArtifactName, *
+              FROM Artifact.Windows.Forensics.Bam()
+        },
+        c={ 
+            SELECT HostName, VMName, CreationTimeUTC, BackupFilePath, 'Windows.Forensics.Shellbags' AS ArtifactName, *
+              FROM Artifact.Windows.Forensics.Shellbags()
+        },
+        d={ 
+            SELECT HostName, VMName, CreationTimeUTC, BackupFilePath, 'Windows.Forensics.SRUM' AS ArtifactName, *
+              FROM Artifact.Windows.Forensics.SRUM()
+        },
+        e={ 
+            SELECT HostName, VMName, CreationTimeUTC, BackupFilePath, 'Windows.Forensics.SAM' AS ArtifactName, *
+              FROM Artifact.Windows.Forensics.SAM()
+        },
+        f={ 
+            SELECT HostName, VMName, CreationTimeUTC, BackupFilePath, 'Windows.Registry.AppCompatCache' AS ArtifactName, *
+              FROM Artifact.Windows.Registry.AppCompatCache()
+        },
+        g={ 
+            SELECT HostName, VMName, CreationTimeUTC, BackupFilePath, 'Windows.Registry.UserAssist' AS ArtifactName, *
+              FROM Artifact.Windows.Registry.UserAssist()
+        },
+        h={ 
+            SELECT HostName, VMName, CreationTimeUTC, BackupFilePath, 'Windows.Registry.RecentDocs' AS ArtifactName, *
+              FROM Artifact.Windows.Registry.RecentDocs()
+        },
+        i={ 
+            SELECT HostName, VMName, CreationTimeUTC, BackupFilePath, 'Windows.Detection.Amcache' AS ArtifactName, *
+              FROM Artifact.Windows.Detection.Amcache()
+        },
+        j={ 
+            SELECT HostName, VMName, CreationTimeUTC, BackupFilePath, 'Windows.Timeline.Prefetch' AS ArtifactName, *
+              FROM Artifact.Windows.Timeline.Prefetch()
+        },
+        k={
+            SELECT HostName, VMName, CreationTimeUTC, BackupFilePath, 'Windows.Timeline.Registry.RunMRU' AS ArtifactName, *
+              FROM Artifact.Windows.Timeline.Registry.RunMRU()
+        },
+        l={
+            SELECT HostName, VMName, CreationTimeUTC, BackupFilePath, 'Windows.Applications.OfficeMacros' AS ArtifactName, *
+              FROM Artifact.Windows.Applications.OfficeMacros()
+        },
+        m={
+            SELECT HostName, VMName, CreationTimeUTC, BackupFilePath, 'Windows.Sys.StartupItems' AS ArtifactName, *
+              FROM Artifact.Windows.Sys.StartupItems()
+        },
+        n={
+            SELECT HostName, VMName, CreationTimeUTC, BackupFilePath, 'Windows.Sys.Users' AS ArtifactName, *
+              FROM Artifact.Windows.Sys.Users()
+        },
+        o={
+            SELECT HostName, VMName, CreationTimeUTC, BackupFilePath, 'Windows.EventLogs.RDPAuth' AS ArtifactName, *
+              FROM Artifact.Windows.EventLogs.RDPAuth()
+        }
+      )
+      
