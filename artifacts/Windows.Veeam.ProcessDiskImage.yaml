@@ -239,32 +239,35 @@ sources:
               FROM Artifact.Windows.Registry.RecentDocs()
         },
         i={ 
+            SELECT HostName, VMName, CreationTimeUTC, BackupFilePath, 'Windows.Registry.MountPoints2' AS ArtifactName, *
+              FROM Artifact.Windows.Registry.MountPoints2()
+        },
+        j={ 
             SELECT HostName, VMName, CreationTimeUTC, BackupFilePath, 'Windows.Detection.Amcache' AS ArtifactName, *
               FROM Artifact.Windows.Detection.Amcache()
         },
-        j={ 
+        k={ 
             SELECT HostName, VMName, CreationTimeUTC, BackupFilePath, 'Windows.Timeline.Prefetch' AS ArtifactName, *
               FROM Artifact.Windows.Timeline.Prefetch()
         },
-        k={
+        l={
             SELECT HostName, VMName, CreationTimeUTC, BackupFilePath, 'Windows.Timeline.Registry.RunMRU' AS ArtifactName, *
               FROM Artifact.Windows.Timeline.Registry.RunMRU()
         },
-        l={
+        m={
             SELECT HostName, VMName, CreationTimeUTC, BackupFilePath, 'Windows.Applications.OfficeMacros' AS ArtifactName, *
               FROM Artifact.Windows.Applications.OfficeMacros()
         },
-        m={
+        n={
             SELECT HostName, VMName, CreationTimeUTC, BackupFilePath, 'Windows.Sys.StartupItems' AS ArtifactName, *
               FROM Artifact.Windows.Sys.StartupItems()
         },
-        n={
+        o={
             SELECT HostName, VMName, CreationTimeUTC, BackupFilePath, 'Windows.Sys.Users' AS ArtifactName, *
               FROM Artifact.Windows.Sys.Users()
         },
-        o={
+        p={
             SELECT HostName, VMName, CreationTimeUTC, BackupFilePath, 'Windows.EventLogs.RDPAuth' AS ArtifactName, *
               FROM Artifact.Windows.EventLogs.RDPAuth()
         }
       )
-      
